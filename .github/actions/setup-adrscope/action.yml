@@ -1,0 +1,51 @@
+name: Set up adrscope
+description: Installs the adrscope CLI from the Cygrid fork, cached by revision.
+
+inputs:
+  repository:
+    description: Git repository to install adrscope from.
+    required: false
+    default: https://github.com/glebnaz-cygrid/adrscope
+  ref:
+    description: Branch or tag to install.
+    required: false
+    default: main
+
+runs:
+  using: composite
+  steps:
+    # The fork publishes no release binaries, so the cache is keyed on the
+    # commit it currently points at rather than on a version number.
+    - name: Resolve adrscope revision
+      id: rev
+      shell: bash
+      run: |
+        set -euo pipefail
+        sha="$(git ls-remote "${{ inputs.repository }}" "${{ inputs.ref }}" | cut -f1)"
+        if [ -z "$sha" ]; then
+          echo "::error::Could not resolve ${{ inputs.ref }} in ${{ inputs.repository }}"
+          exit 1
+        fi
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+    - name: Restore cached binary
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cargo/bin/adrscope
+        key: adrscope-${{ runner.os }}-${{ steps.rev.outputs.sha }}
+
+    - name: Install Rust toolchain
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      with:
+        toolchain: stable
+
+    - name: Build adrscope
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo install --git "${{ inputs.repository }}" --rev "${{ steps.rev.outputs.sha }}" --locked adrscope
+
+    - name: Report version
+      shell: bash
+      run: adrscope --version

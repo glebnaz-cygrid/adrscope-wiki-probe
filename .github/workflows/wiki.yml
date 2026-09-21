@@ -1,0 +1,85 @@
+name: Publish Wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/decisions/**'
+      - '.github/workflows/wiki.yml'
+      - '.github/actions/setup-adrscope/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Wiki pushes are serialised: two concurrent runs would race on the same
+# non-rebasing remote.
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ADRs to the wiki
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-adrscope
+
+      - name: Generate wiki pages
+        env:
+          ADR_VIEWER_URL: ${{ vars.ADR_VIEWER_URL }}
+        run: |
+          set -euo pipefail
+          args=(--input docs/decisions --output build/wiki)
+          if [ -n "${ADR_VIEWER_URL:-}" ]; then
+            args+=(--pages-url "$ADR_VIEWER_URL")
+          fi
+          adrscope wiki "${args[@]}"
+
+      - name: Shape the pages for the GitHub wiki
+        run: |
+          set -euo pipefail
+          # The wiki landing page has to be called Home.
+          mv build/wiki/ADR-Index.md build/wiki/Home.md
+          # Wiki URLs carry no file extension, so inter-page links must not either.
+          find build/wiki -name '*.md' -print0 \
+            | xargs -0 sed -i -E 's/\]\(([^):]+)\.md\)/](\1)/g'
+
+      - name: Publish
+        env:
+          # GITHUB_TOKEN is enough for a repository's own wiki. Set a WIKI_TOKEN
+          # secret only if an org policy narrows the default token's scope.
+          WIKI_URL: https://x-access-token:${{ secrets.WIKI_TOKEN || secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git
+        run: |
+          set -euo pipefail
+
+          # The wiki git repository does not exist until the first page has been
+          # saved in the web UI, and a push cannot bring it into existence.
+          if ! git ls-remote "$WIKI_URL" >/dev/null 2>&1; then
+            echo "::error::The wiki is not initialised. Open https://github.com/${{ github.repository }}/wiki, save any page once, then re-run this workflow."
+            exit 1
+          fi
+
+          git clone --depth 1 "$WIKI_URL" wiki
+          # Drop pages whose ADR is gone; anything hand-written outside *.md stays.
+          find wiki -maxdepth 1 -name '*.md' -delete
+          cp build/wiki/*.md wiki/
+
+          cd wiki
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Wiki already up to date."
+            exit 0
+          fi
+
+          git commit -m "Publish ADRs from ${GITHUB_SHA:0:7}"
+          git push
+
+      - name: Link to the wiki
+        run: |
+          echo "Published to https://github.com/${{ github.repository }}/wiki" >> "$GITHUB_STEP_SUMMARY"
